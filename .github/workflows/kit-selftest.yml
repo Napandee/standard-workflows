@@ -1,0 +1,61 @@
+name: Demo actions self-test
+
+# Runs the demo-check, demo-audit and demo-capture composite actions against a
+# tiny made-up site (demo-kit/test/fixtures/selftest) with a different base path
+# and name from any real project, so nothing project-specific can hide in them.
+on:
+  pull_request:
+    paths:
+      - 'demo-kit/**'
+      - 'demo-check/**'
+      - 'demo-audit/**'
+      - 'demo-capture/**'
+      - '.github/workflows/kit-selftest.yml'
+      - '.github/workflows/demo.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'demo-kit/**'
+      - 'demo-check/**'
+      - 'demo-audit/**'
+      - 'demo-capture/**'
+      - '.github/workflows/kit-selftest.yml'
+      - '.github/workflows/demo.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kit-selftest-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  actions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Lay out the fixture as a project would
+        run: |
+          cp -r demo-kit/test/fixtures/selftest/site _site
+          cp -r demo-kit/test/fixtures/selftest/demo demo
+      - uses: ./demo-check
+      - uses: ./demo-audit
+      - uses: ./demo-capture
+      - name: Screenshots are named from the project config
+        run: |
+          ls shots
+          test -s shots/fixture-hero.jpg
+          test -s shots/fixture-desktop.jpg
+          test -s shots/fixture-mobile.jpg
+
+  # The reusable demo workflow end to end on the fixture, with the kit taken
+  # from this same commit.
+  reusable-demo:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/demo.yml
+    with:
+      build-command: cp -r "$DEMO_KIT/test/fixtures/selftest/site" _site && mkdir -p demo && cp "$DEMO_KIT"/test/fixtures/selftest/demo/* demo/
+      kit-ref: ${{ github.sha }}

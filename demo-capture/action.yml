@@ -1,0 +1,22 @@
+name: Demo screenshots
+description: Captures <name>-desktop.jpg, <name>-mobile.jpg and a framed <name>-hero.jpg from the built demo; fails only if the hero cannot be made.
+inputs:
+  site-dir:
+    description: Built static demo site, relative to the workspace
+    default: _site
+  config:
+    description: The project's demo config (needs now, name, siteLabel), relative to the workspace
+    default: demo/demo.config.json
+  out-dir:
+    description: Output directory, relative to the workspace
+    default: shots
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        SITE_DIR: ${{ inputs.site-dir }}
+        CONFIG: ${{ inputs.config }}
+        OUT_DIR: ${{ inputs.out-dir }}
+        KIT: ${{ github.action_path }}/../demo-kit
+      run: '"$KIT/ci-run.sh" capture "$SITE_DIR" "$OUT_DIR" --config "$CONFIG"'

@@ -1,0 +1,14 @@
+name: Demo site check
+description: Serves a built demo site the way GitHub Pages does and fails on page errors, failed requests or /api calls the demo cannot answer during load.
+inputs:
+  site-dir:
+    description: Built static demo site, relative to the workspace
+    default: _site
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        SITE_DIR: ${{ inputs.site-dir }}
+        KIT: ${{ github.action_path }}/../demo-kit
+      run: '"$KIT/ci-run.sh" check "$SITE_DIR"'

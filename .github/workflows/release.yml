@@ -1,0 +1,329 @@
+name: Release (reusable)
+
+# Deliberate release of a project's container image, called from the project's
+# own workflow_dispatch "Release" workflow:
+#
+#   1. publish     refuse unless on main and HEAD is untagged; compute the next
+#                  vX.Y.Z (scripts/next_version.py); build and push ONCE to
+#                  :candidate-<sha> with SBOM + provenance; Trivy-scan that exact
+#                  digest (fails on fixable HIGH/CRITICAL); add :X.Y.Z, :X.Y, :X
+#                  and :latest to the same digest; tag the commit and create the
+#                  GitHub release with generated notes.
+#   2. demo        (inputs.demo) build the static demo of the same commit, run the
+#                  site check and layout audit, upload `demo-site`.
+#   3. screenshots (inputs.demo) <name>-hero/desktop/mobile.jpg onto the release.
+#   4. pages       (inputs.demo && inputs.pages) deploy the demo to GitHub Pages.
+#
+# The release kit (scripts/, demo-kit/, demo-* actions) is checked out at
+# inputs.kit-ref, which must name the same ref the caller pins this workflow
+# to (default v1, matching `@v1`); a test branch passes its own branch name. :latest moves before the tag and release are created; if those
+# steps fail, recovery is manual. Re-run failed jobs, never all jobs.
+#
+# Caller job permissions: contents: write, packages: write, pages: write,
+# id-token: write.
+on:
+  workflow_call:
+    inputs:
+      bump:
+        description: "patch, minor or major"
+        type: string
+        required: true
+      image:
+        description: "Image name under ghcr.io/<owner>/ (default: the repo name, lowercased)"
+        type: string
+        default: ""
+      context:
+        type: string
+        default: .
+      file:
+        type: string
+        default: Dockerfile
+      build-args:
+        description: "Extra newline-separated KEY=value build args (VERSION and GIT_SHA are always passed)"
+        type: string
+        default: ""
+      first-version:
+        description: Version used when the repo has no vX.Y.Z tag yet
+        type: string
+        default: 1.0.0
+      runner:
+        type: string
+        default: ubuntu-latest
+      demo:
+        description: Build, check and audit the static demo and attach screenshots
+        type: boolean
+        default: true
+      demo-build-command:
+        description: "Command that builds the demo into _site (DEMO_KIT points at the kit)"
+        type: string
+        default: sh demo/build.sh
+      demo-test-command:
+        description: Optional project demo tests (e.g. recorder tests); empty skips
+        type: string
+        default: ""
+      demo-logs-path:
+        description: Demo build logs uploaded when the demo job fails
+        type: string
+        default: demo/.build
+      demo-config:
+        type: string
+        default: demo/demo.config.json
+      demo-baseline:
+        type: string
+        default: demo/audit-baseline.json
+      pages:
+        description: Deploy the demo to GitHub Pages
+        type: boolean
+        default: true
+      kit-ref:
+        description: "Ref of Napandee/standard-workflows the kit is checked out at; must match the ref this workflow is called at"
+        type: string
+        default: v1
+    outputs:
+      version:
+        value: ${{ jobs.publish.outputs.version }}
+      digest:
+        value: ${{ jobs.publish.outputs.digest }}
+
+jobs:
+  publish:
+    runs-on: ${{ inputs.runner }}
+    permissions:
+      contents: write
+      packages: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - name: Refuse unless running on main
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Releases run from main only (got ${GITHUB_REF})"
+          exit 1
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Check out the release kit (inputs.kit-ref)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Napandee/standard-workflows
+          ref: ${{ inputs.kit-ref }}
+          path: .standard-kit
+          persist-credentials: false
+
+      - name: Refuse if HEAD already carries a release tag
+        run: |
+          existing=$(git tag --points-at HEAD --list 'v*')
+          if [ -n "$existing" ]; then
+            echo "::error::HEAD already carries ${existing}. If its image and git tag were published but the GitHub release was not, finish it with: gh release create ${existing} --generate-notes --verify-tag. Otherwise use 'Re-run failed jobs' on the later jobs of that release run."
+            exit 1
+          fi
+
+      - name: Compute version
+        id: version
+        env:
+          BUMP: ${{ inputs.bump }}
+          FIRST: ${{ inputs.first-version }}
+        run: |
+          git fetch --tags --force origin
+          version=$(python3 .standard-kit/scripts/next_version.py --first "$FIRST" "$BUMP")
+          {
+            echo "version=${version}"
+            echo "minor=${version%.*}"
+            echo "major=${version%%.*}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Releasing v${version}"
+
+      - name: Refuse if the tag already exists on the remote
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/v${VERSION}" >/dev/null 2>&1; then
+            echo "::error::Tag v${VERSION} already exists on the remote"
+            exit 1
+          fi
+
+      - name: Resolve image name
+        env:
+          OWNER: ${{ github.repository_owner }}
+          INPUT_IMAGE: ${{ inputs.image }}
+          REPO: ${{ github.event.repository.name }}
+        run: |
+          name=${INPUT_IMAGE:-$REPO}
+          echo "IMAGE=ghcr.io/$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')/$(echo "$name" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to GHCR
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push the release candidate (once)
+        id: push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.file }}
+          push: true
+          provenance: mode=max
+          sbom: true
+          tags: ${{ env.IMAGE }}:candidate-${{ github.sha }}
+          build-args: |
+            VERSION=${{ steps.version.outputs.version }}
+            GIT_SHA=${{ github.sha }}
+            ${{ inputs.build-args }}
+
+      - name: Trivy scan of the candidate digest (fails on fixable HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_USERNAME: ${{ github.actor }}
+          TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          image-ref: ${{ env.IMAGE }}@${{ steps.push.outputs.digest }}
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+          exit-code: 1
+
+      - name: Release tags on the scanned digest
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+          VERSION: ${{ steps.version.outputs.version }}
+          MINOR: ${{ steps.version.outputs.minor }}
+          MAJOR: ${{ steps.version.outputs.major }}
+        run: |
+          docker buildx imagetools create \
+            -t "$IMAGE:$VERSION" -t "$IMAGE:$MINOR" -t "$IMAGE:$MAJOR" -t "$IMAGE:latest" \
+            "$IMAGE@$DIGEST"
+          released=$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{json .Manifest.Digest}}' | tr -d '"')
+          echo "scanned digest:  $DIGEST"
+          echo "released digest: $released"
+          [ "$released" = "$DIGEST" ] || { echo "::error::released digest differs from the scanned one"; exit 1; }
+
+      - name: Tag and create the GitHub release
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git tag "v${VERSION}"
+          git push origin "refs/tags/v${VERSION}"
+          gh release create "v${VERSION}" --generate-notes --title "v${VERSION}" --verify-tag
+
+  demo:
+    needs: publish
+    if: inputs.demo
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      ENGINE: docker
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check out the demo kit (inputs.kit-ref)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Napandee/standard-workflows
+          ref: ${{ inputs.kit-ref }}
+          path: .standard-kit
+          persist-credentials: false
+      - name: Build the demo
+        env:
+          BUILD: ${{ inputs.demo-build-command }}
+        run: DEMO_KIT="$GITHUB_WORKSPACE/.standard-kit/demo-kit" sh -c "$BUILD"
+      - name: Project demo tests
+        if: inputs.demo-test-command != ''
+        env:
+          TESTS: ${{ inputs.demo-test-command }}
+        run: DEMO_KIT="$GITHUB_WORKSPACE/.standard-kit/demo-kit" sh -c "$TESTS"
+      - uses: ./.standard-kit/demo-check
+      - uses: ./.standard-kit/demo-audit
+        with:
+          baseline: ${{ inputs.demo-baseline }}
+      - name: Upload demo-site
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: demo-site
+          path: _site
+          include-hidden-files: true
+      - name: Upload audit screenshots
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: audit-shots
+          path: audit-shots
+          if-no-files-found: ignore
+      - name: Upload demo build logs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: demo-build-logs
+          path: ${{ inputs.demo-logs-path }}
+          include-hidden-files: true
+          if-no-files-found: ignore
+
+  screenshots:
+    needs: [publish, demo]
+    if: inputs.demo
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check out the demo kit (inputs.kit-ref)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Napandee/standard-workflows
+          ref: ${{ inputs.kit-ref }}
+          path: .standard-kit
+          persist-credentials: false
+      - name: Download demo-site
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: demo-site
+          path: _site
+      - uses: ./.standard-kit/demo-capture
+        with:
+          config: ${{ inputs.demo-config }}
+      - name: Attach screenshots to the release
+        env:
+          VERSION: ${{ needs.publish.outputs.version }}
+          CONFIG: ${{ inputs.demo-config }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          name=$(jq -r .name "$CONFIG")
+          gh release upload "v${VERSION}" "shots/${name}-hero.jpg" "shots/${name}-desktop.jpg" "shots/${name}-mobile.jpg" --clobber
+
+  pages:
+    needs: demo
+    if: inputs.demo && inputs.pages
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Download demo-site
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: demo-site
+          path: _site
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: _site
+          include-hidden-files: true
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

@@ -1,0 +1,9 @@
+{
+  "name": "demo-kit",
+  "private": true,
+  "license": "MIT",
+  "description": "Generic demo-site tooling (shim, Pages-like server, site check, layout audit, screenshots). Runs in mcr.microsoft.com/playwright:v1.64.1-noble.",
+  "dependencies": {
+    "playwright": "1.64.1"
+  }
+}

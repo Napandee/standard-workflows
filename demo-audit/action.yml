@@ -1,0 +1,22 @@
+name: Demo layout audit
+description: Audits every demo page at desktop (1440x900) and phone (393x852) width; fails on findings not in the project's baseline.
+inputs:
+  site-dir:
+    description: Built static demo site, relative to the workspace
+    default: _site
+  baseline:
+    description: Baseline of known findings, relative to the workspace
+    default: demo/audit-baseline.json
+  shots-dir:
+    description: Where full-page screenshots go, relative to the workspace
+    default: audit-shots
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        SITE_DIR: ${{ inputs.site-dir }}
+        BASELINE: ${{ inputs.baseline }}
+        SHOTS: ${{ inputs.shots-dir }}
+        KIT: ${{ github.action_path }}/../demo-kit
+      run: '"$KIT/ci-run.sh" audit "$SITE_DIR" --baseline "$BASELINE" --shots "$SHOTS"'

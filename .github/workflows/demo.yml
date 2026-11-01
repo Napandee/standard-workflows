@@ -1,0 +1,109 @@
+name: Demo (reusable)
+
+# Builds a project's static fake-data demo and checks it: the project's build
+# command writes _site, an optional project test command runs, then the kit's
+# site check and layout audit. Uploads demo-site and audit-shots. The caller
+# owns its pull_request trigger and path filters:
+#
+#   jobs:
+#     demo:
+#       permissions: { contents: read }
+#       uses: Napandee/standard-workflows/.github/workflows/demo.yml@v1
+on:
+  workflow_call:
+    inputs:
+      build-command:
+        description: "Builds the demo into _site (DEMO_KIT points at the kit)"
+        type: string
+        default: sh demo/build.sh
+      test-command:
+        description: Optional project demo tests (e.g. recorder tests); empty skips
+        type: string
+        default: ""
+      baseline:
+        type: string
+        default: demo/audit-baseline.json
+      logs-path:
+        description: Build logs uploaded when the job fails
+        type: string
+        default: demo/.build
+      runner:
+        type: string
+        default: ubuntu-latest
+      kit-ref:
+        description: "Ref of Napandee/standard-workflows the kit is checked out at; must match the ref this workflow is called at"
+        type: string
+        default: v1
+
+permissions:
+  contents: read
+
+jobs:
+  demo:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 30
+    env:
+      ENGINE: docker
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check out the demo kit (inputs.kit-ref)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Napandee/standard-workflows
+          ref: ${{ inputs.kit-ref }}
+          path: .standard-kit
+          persist-credentials: false
+
+      - name: Build the demo
+        id: build
+        env:
+          BUILD: ${{ inputs.build-command }}
+        run: DEMO_KIT="$GITHUB_WORKSPACE/.standard-kit/demo-kit" sh -c "$BUILD"
+
+      - name: Project demo tests
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && inputs.test-command != '' }}
+        env:
+          TESTS: ${{ inputs.test-command }}
+        run: DEMO_KIT="$GITHUB_WORKSPACE/.standard-kit/demo-kit" sh -c "$TESTS"
+
+      - name: Site check
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        uses: ./.standard-kit/demo-check
+
+      - name: Layout audit
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        uses: ./.standard-kit/demo-audit
+        with:
+          baseline: ${{ inputs.baseline }}
+
+      - name: Upload demo-site
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: demo-site
+          path: _site
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload audit-shots
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: audit-shots
+          path: audit-shots
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload build logs
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: demo-build-logs
+          path: ${{ inputs.logs-path }}
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 14
