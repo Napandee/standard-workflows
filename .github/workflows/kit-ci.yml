@@ -1,8 +1,9 @@
 name: Demo kit CI
 
 # Tests the demo kit (demo-kit/), the release version script and the change
-# filter (scripts/changes.py, changes.yml) on GitHub's hosted runners. The kit is shared by every project's demo, so it is tested
-# here before the v1 tag can move.
+# filter (scripts/changes.py, changes.yml) on GitHub's hosted runners. The kit
+# is shared by every project's demo, so it is tested here before the v1 tag
+# can move.
 on:
   pull_request:
   push:
@@ -58,9 +59,10 @@ jobs:
       - run: python -m pytest -q test_changes.py
 
   # The reusable change filter end to end on this repo, with the script from
-  # this same commit. Which groups are true depends on the change, so the
-  # check is on the shape: valid JSON with exactly these keys, booleans, and a
-  # group that matches no file is false unless every group was forced true.
+  # this same commit. The check job works out on its own what each flag must
+  # be: on main every group is true; on a pull request the flags follow
+  # `git diff --name-only HEAD^1 HEAD` (all true when kit-ci.yml, the caller,
+  # changed), and `all` matches every file, so an all-false filter fails.
   changes-selftest:
     permissions:
       contents: read
@@ -70,25 +72,45 @@ jobs:
         # a comment line
         workflows: .github/workflows
         scripts: 'scripts/*.py'
-        none: does-not-exist ':!does-not-exist/either'
+        license: LICENSE
+        all: .
       kit-ref: ${{ github.sha }}
 
   changes-outputs:
     needs: changes-selftest
     runs-on: ubuntu-latest
     steps:
-      - name: Outputs are valid and complete
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Flags match what this change touched
         env:
           FLAGS: ${{ needs.changes-selftest.outputs.groups }}
           CODE: ${{ needs.changes-selftest.outputs.code }}
           SCRIPTS: ${{ fromJSON(needs.changes-selftest.outputs.groups).scripts }}
+          EVENT: ${{ github.event_name }}
         run: |
           echo "groups=$FLAGS code=$CODE scripts=$SCRIPTS"
-          echo "$FLAGS" | jq -e 'keys == ["none", "scripts", "workflows"]'
+          echo "$FLAGS" | jq -e 'keys == ["all", "license", "scripts", "workflows"]'
           echo "$FLAGS" | jq -e 'map_values(type == "boolean") | all'
-          echo "$FLAGS" | jq -e '.none == false or (map_values(.) | all)'
-          case "$CODE" in true|false) ;; *) echo "::error::code is '$CODE'"; exit 1 ;; esac
-          case "$SCRIPTS" in true|false) ;; *) echo "::error::fromJSON read '$SCRIPTS'"; exit 1 ;; esac
+          [ "$SCRIPTS" = "$(echo "$FLAGS" | jq -r .scripts)" ] || { echo "::error::fromJSON read '$SCRIPTS'"; exit 1; }
+          has() { if printf '%s\n' "$changed" | grep -Eq "$1"; then echo true; else echo false; fi; }
+          if [ "$EVENT" = pull_request ]; then
+            changed=$(git diff --name-only HEAD^1 HEAD)
+            printf 'changed:\n%s\n' "$changed"
+          fi
+          if [ "$EVENT" != pull_request ] || [ "$(has '^\.github/workflows/kit-ci\.yml$')" = true ]; then
+            want='{"all":true,"license":true,"scripts":true,"workflows":true}'; want_code=true
+          else
+            want=$(jq -cn --argjson a "$(has .)" --argjson l "$(has '^LICENSE$')" \
+              --argjson s "$(has '^scripts/[^/]*\.py$')" --argjson w "$(has '^\.github/workflows/')" \
+              '{all: $a, license: $l, scripts: $s, workflows: $w}')
+            want_code=$(printf '%s\n' "$changed" | grep -Ev '^docs/|\.md$' | grep -q . && echo true || echo false)
+          fi
+          echo "want=$want code=$want_code"
+          echo "$FLAGS" | jq -e --argjson want "$want" '. == $want'
+          [ "$CODE" = "$want_code" ] || { echo "::error::code is '$CODE', want '$want_code'"; exit 1; }
 
   # This repo is public and generic. Private homelab detail belongs in the
   # private Napandee/actions repo, never here (README "What belongs where").
