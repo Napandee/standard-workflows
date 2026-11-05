@@ -19,7 +19,7 @@ result goes to FILE (normally $GITHUB_OUTPUT) as two lines:
 
 Every group and `code` are true, with the reason logged, when:
   - the event is a push to a full-run branch (--full-run-branches, else
-    --default-branch);
+    --default-branch), or a push with neither known;
   - there is no usable base: pull_request compares with HEAD^1 (the base
     branch in the merge checkout); push and merge_group with --before, fetched
     shallow from origin when missing (FETCH_TOKEN in the environment is sent
@@ -93,14 +93,16 @@ def git(*args, check=True, env=None):
     )
 
 
-def fetch_env(environ):
-    """Git config, as environment, that sends FETCH_TOKEN as the auth header."""
+def fetch_env(environ, url):
+    """Git config, as environment, that sends FETCH_TOKEN as the auth header
+    to `url` (origin) only, added after any GIT_CONFIG_* entries already set."""
     token = environ.get("FETCH_TOKEN")
     if not token:
         return {}
     basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
-    return {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "http.extraheader",
-            "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {basic}"}
+    n = int(environ.get("GIT_CONFIG_COUNT") or 0)
+    return {"GIT_CONFIG_COUNT": str(n + 1), f"GIT_CONFIG_KEY_{n}": f"http.{url}.extraheader",
+            f"GIT_CONFIG_VALUE_{n}": f"AUTHORIZATION: basic {basic}"}
 
 
 def is_commit(ref):
@@ -127,7 +129,8 @@ def check_patterns(owner, patterns):
         if listed.returncode != 0:
             raise GroupsError(f"{owner}: git refused the pattern {pattern!r}: {listed.stderr.strip()}")
         if not listed.stdout:
-            raise GroupsError(f"{owner}: the pattern {pattern!r} matches no file at HEAD")
+            raise GroupsError(f"{owner}: the pattern {pattern!r} matches no file at HEAD; "
+                              "remove or update the pattern in the caller's groups")
 
 
 def find_base(event, before):
@@ -142,8 +145,9 @@ def find_base(event, before):
         if not SHA.match(before):
             return None, f"before={before!r} is not a full commit sha"
         if not is_commit(before):
+            url = git("remote", "get-url", "origin", check=False).stdout.strip()
             fetch = git("fetch", "-q", "--no-tags", "--depth=1", "--end-of-options",
-                        "origin", before, check=False, env=fetch_env(os.environ))
+                        "origin", before, check=False, env=fetch_env(os.environ, url))
             if fetch.returncode != 0 or not is_commit(before):
                 return None, f"cannot fetch the commit before the push ({before}): {fetch.stderr.strip()}"
         return before, None
@@ -256,9 +260,12 @@ def main(argv=None):
         return finish({name: True for name in groups}, True)
 
     full_run = args.full_run_branches.split() or [args.default_branch] * bool(args.default_branch)
-    if args.event == "push" and args.ref.startswith("refs/heads/") \
-            and args.ref[len("refs/heads/"):] in full_run:
-        return everything(f"a push to {args.ref[len('refs/heads/'):]} runs everything")
+    if args.event == "push":
+        if not full_run:
+            return everything("default branch unknown and no full-run-branches given")
+        branch = args.ref[len("refs/heads/"):] if args.ref.startswith("refs/heads/") else None
+        if branch in full_run:
+            return everything(f"a push to {branch} runs everything")
 
     base, reason = find_base(args.event, args.before)
     if base is None:

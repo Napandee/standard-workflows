@@ -92,7 +92,10 @@ def run(repo, *args, groups=GROUPS, env=None):
 
 
 def push(repo, before, *extra, groups=GROUPS):
-    return run(repo, "--event", "push", f"--before={before}", *extra, groups=groups)
+    # A push to a topic branch of a repo whose default branch is main; later
+    # arguments in `extra` override these.
+    return run(repo, "--event", "push", f"--before={before}", "--ref", "refs/heads/topic",
+               "--default-branch", "main", *extra, groups=groups)
 
 
 def change(repo, files, *extra, groups=GROUPS):
@@ -156,6 +159,7 @@ def test_pattern_matching_no_file_fails_naming_group_and_pattern(repo, pattern):
                           groups=f"web: web {pattern}")
     assert proc.returncode != 0
     assert "web" in proc.stderr and pattern.strip("'") in proc.stderr
+    assert "remove or update the pattern" in proc.stderr
     assert result == {}
 
 
@@ -279,6 +283,16 @@ def test_version_moves_in_listed_file_are_no_change(pinned, replace):
     assert result["groups"]["server"] is False
 
 
+def test_dependency_bump_in_listed_file_is_no_change(repo):
+    # The documented limit of version-files: it cannot tell the project's own
+    # version from a dependency's, so list only files holding the former.
+    commit(repo, {"server/requirements.txt": "requests==2.31.0\n"})
+    _, result = change(repo, {"server/requirements.txt": "requests==2.32.0\n"},
+                       "--version-files", "server/requirements.txt",
+                       groups="server: server")
+    assert result["groups"] == {"server": False}
+
+
 @pytest.mark.parametrize("name,replace", [
     ("other suffix", {"lib": "lib 4.5.6-foo.1\n"}),
     ("image suffix", {"base": "base 1.2.3-alpine\n"}),
@@ -344,6 +358,19 @@ def test_push_to_default_branch_runs_everything(repo):
     assert "main" in proc.stdout and "every group" in proc.stdout
 
 
+def test_push_with_unknown_default_branch_runs_everything(repo):
+    proc, result = change(repo, {"docs/guide.md": "x\n"},
+                          "--ref", "refs/heads/topic", "--default-branch", "")
+    assert result == {"groups": {"web": True, "server": True}, "code": "true"}
+    assert "default branch unknown" in proc.stdout
+
+
+def test_unknown_default_branch_is_fine_with_named_full_run_branches(repo):
+    _, result = change(repo, {"docs/guide.md": "x\n"}, "--ref", "refs/heads/topic",
+                       "--default-branch", "", "--full-run-branches", "main")
+    assert result["groups"] == {"web": False, "server": False}
+
+
 def test_push_to_other_branch_is_filtered(repo):
     _, result = change(repo, {"docs/guide.md": "x\n"},
                        "--ref", "refs/heads/topic", "--default-branch", "main")
@@ -399,13 +426,25 @@ def test_push_fetches_before_from_origin_when_missing(tmp_path, repo):
     assert result == {"groups": {"web": False, "server": True}, "code": "true"}
 
 
+URL = "https://example.com/someone/proj"
+
+
 def test_fetch_env_passes_the_token_as_a_header_only_when_given():
-    assert fetch_env({}) == {}
-    env = fetch_env({"FETCH_TOKEN": "abc"})
+    assert fetch_env({}, URL) == {}
+    env = fetch_env({"FETCH_TOKEN": "abc"}, URL)
     assert env["GIT_CONFIG_COUNT"] == "1"
-    assert env["GIT_CONFIG_KEY_0"] == "http.extraheader"
+    assert env["GIT_CONFIG_KEY_0"] == f"http.{URL}.extraheader"   # origin only
     expected = base64.b64encode(b"x-access-token:abc").decode()
     assert env["GIT_CONFIG_VALUE_0"] == f"AUTHORIZATION: basic {expected}"
+
+
+def test_fetch_env_adds_to_existing_git_config_env():
+    env = fetch_env({"FETCH_TOKEN": "abc", "GIT_CONFIG_COUNT": "2",
+                     "GIT_CONFIG_KEY_0": "a.b", "GIT_CONFIG_VALUE_0": "1",
+                     "GIT_CONFIG_KEY_1": "c.d", "GIT_CONFIG_VALUE_1": "2"}, URL)
+    assert env["GIT_CONFIG_COUNT"] == "3"
+    assert env["GIT_CONFIG_KEY_2"] == f"http.{URL}.extraheader"
+    assert "GIT_CONFIG_KEY_0" not in env and "GIT_CONFIG_KEY_1" not in env  # left as they are
 
 
 # ---- pull request: the merge checkout's first parent -----------------------

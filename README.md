@@ -150,8 +150,11 @@ jobs:
   the merge checkout). A `merge_group` is compared with its base commit, and a push to
   another branch with the commit before the push, fetched shallow.
 - **Everything runs** (every group and `code` true, reason in the log):
-  - on a push to the default branch, or to the branches named in `full-run-branches`
-    (space-separated; replaces the default), so `main` is always fully tested;
+  - on a push to the default branch, so `main` is always fully tested, or to the
+    branches named in `full-run-branches` (space-separated). That list **replaces** the
+    default, so include the default branch in it (`full-run-branches: main release`);
+  - on any push when the default branch is unknown and `full-run-branches` is empty
+    (logged as "default branch unknown");
   - when there is nothing to compare with: a new branch or tag, a force push whose old
     commit is gone, or any other event (`workflow_dispatch`, `schedule`,
     `pull_request_target`);
@@ -160,15 +163,19 @@ jobs:
     case; set `workflow-path` to name another file, or `-` to turn it off.
 - **What counts:** every changed line, and any file added, deleted, renamed, or with its
   mode or binary content changed. The one exception is opt-in: in a file matched by
-  `version-files` (pathspecs, default none, e.g. `version-files: package.json
-  chart/Chart.yaml`), a change that only moves version numbers (`1.2.3`,
-  `1.2.3-rc.4`, suffixes `rc`, `dev`, `alpha`, `beta` only, never inside a dotted run
-  of four or more parts such as an IP address) does not count, so a release bump runs
-  nothing. Lines are compared in order, so a reorder counts. Never list files where a
-  version move matters, such as requirements or a Dockerfile. `code` goes by file
-  names alone.
+  `version-files` (pathspecs, default none, e.g. `version-files: VERSION`), a change
+  that only moves version numbers (`1.2.3`, `1.2.3-rc.4`, suffixes `rc`, `dev`,
+  `alpha`, `beta` only, never inside a dotted run of four or more parts such as an IP
+  address) does not count, so a release bump runs nothing. Lines are compared in
+  order, so a reorder counts.
+- **List only files that hold nothing but the project's own version.** The filter cannot
+  tell the project's version from a dependency's: in a listed file a dependency bump
+  counts as no change too. `package.json`, `Chart.yaml` and `pyproject.toml` usually
+  carry dependency versions, as do requirements files and Dockerfiles, so they must
+  not be listed. `code` goes by file names alone.
 - The caller job grants `contents: read`. No credentials are stored in the checkout;
-  the token is sent only with the one shallow fetch of the commit before a push.
+  the token is sent, to the origin URL only, with the one shallow fetch of the commit
+  before a push.
 
 Inputs: `groups` (required), `version-files`, `full-run-branches`, `workflow-path`,
 `runner`, `kit-ref`. Outputs `groups`, `code`.

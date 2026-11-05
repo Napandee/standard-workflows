@@ -104,7 +104,7 @@ jobs:
             want='{"all":true,"license":true,"scripts":true,"workflows":true}'; want_code=true
           else
             want=$(jq -cn --argjson a "$(has .)" --argjson l "$(has '^LICENSE$')" \
-              --argjson s "$(has '^scripts/[^/]*\.py$')" --argjson w "$(has '^\.github/workflows/')" \
+              --argjson s "$(has '^scripts/.*\.py$')" --argjson w "$(has '^\.github/workflows/')" \
               '{all: $a, license: $l, scripts: $s, workflows: $w}')
             want_code=$(printf '%s\n' "$changed" | grep -Ev '^docs/|\.md$' | grep -q . && echo true || echo false)
           fi
