@@ -80,11 +80,12 @@ schedule.
 
 ## `changes.yml`
 
-Says which named path groups a change touches, so slow jobs run only when needed and
-hosted minutes are not spent on a docs fix. The caller lists its groups; the outputs
-are `groups`, a JSON object of name → `true`/`false` (a reusable workflow's outputs are
-fixed, hence JSON), and `code`, `'true'` when anything outside `docs/` and `*.md`
-changed. The logic is `scripts/changes.py`.
+Says which named path groups a pull request touches, so slow jobs run only when needed
+and hosted minutes are not spent on a docs fix. The caller lists its groups; the
+outputs are `groups`, a JSON object of name → `true`/`false` (a reusable workflow's
+outputs are fixed, hence JSON), and `code`, the **string** `'true'` when anything
+outside `docs/` and `*.md` changed (else `'false'`; compare with `== 'true'`). The logic
+is `scripts/changes.py`.
 
 ```yaml
 on:
@@ -97,8 +98,8 @@ jobs:
     uses: Napandee/standard-workflows/.github/workflows/changes.yml@v1
     with:
       groups: |
-        ui: web scripts/check_*.mjs
-        installer: scripts/install.sh installer
+        ui: web scripts/check_*.mjs .github
+        installer: scripts/install.sh installer .github
   ui-checks:
     needs: changes
     if: fromJSON(needs.changes.outputs.groups).ui
@@ -111,34 +112,66 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: echo "build and test"
+  # The only required check. A skipped job is fine; a failed or cancelled one,
+  # or a failed filter (which would skip everything), is not.
+  gate:
+    if: always()
+    needs: [changes, ui-checks, build]
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          FILTER: ${{ needs.changes.result }}
+          BROKEN: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+        run: |
+          if [ "$FILTER" != success ] || [ "$BROKEN" = true ]; then
+            echo "::error::changes: $FILTER; a needed job failed or was cancelled: $BROKEN"
+            exit 1
+          fi
 ```
 
+- **Make `gate` the only required check** in branch protection, and list every job in
+  its `needs`. A required job that is skipped counts as passed, so requiring the slow
+  jobs themselves would not protect anything, and a failing `changes` job would skip
+  them all.
+- **Group names in `if:` are not checked:** `fromJSON(...).iu` is simply empty, and the
+  job never runs. Copy names from the `groups` input.
 - **Groups:** one per line, `name: pattern pattern ...`; blank lines and `#` comments
   are skipped, and a pattern with spaces can be quoted. Names are letters, digits, `_`
   and `-` (read a name with `-` as `fromJSON(...)['my-group']`). Patterns are git
   pathspecs: `web` is the folder, `*` also crosses `/` (`*.mjs` matches at any depth),
-  `':!web/vendor'` excludes. A malformed line, or a pattern git refuses, fails the job
-  and names the line.
-- **Compared with:** a `pull_request` with its base branch (the first parent of the
-  merge checkout); a `push` (and a `merge_group`) with the commit before it, fetched
-  shallow. So a push to `main` runs only what its own commits need: the pull request
-  already ran the rest.
-- **Everything runs** (every group and `code` true, reason in the log) when there is
-  nothing to compare with: a new branch or tag, a force push whose old commit is gone,
-  or any other event (`workflow_dispatch`, `schedule`, `pull_request_target`). Also
-  when the caller's own workflow file changed: the path comes from
-  `github.workflow_ref`; set `workflow-path` to name another file, or `-` to turn it off.
-- **What counts:** a file added, deleted, renamed, with its mode or binary content
-  changed, or with changed lines (lines moved between files count). With
-  `ignore-versions` (default `true`) a file whose changed lines differ only in version
-  numbers (`1.2.3`, `1.2.3-rc.1`) does not count, so a release bump runs nothing.
-  `code` goes by file names alone.
-- The caller job grants `contents: read`. The checkout keeps its token for the one
-  shallow fetch of the commit before a push (needed in a private repo); only git and
-  the script run in the job.
+  `':!web/vendor'` excludes. The job fails, naming the line, group or pattern, on a
+  malformed line, a pattern git refuses, or a pattern that matches no file at HEAD (an
+  exclude is checked by what it excludes), so a stale path cannot silently turn a group
+  off. An empty input fails too; write `groups: none` to use `code` alone.
+- **Add `.github` to every group** (or keep a shared `ci` group that runs everything),
+  so a change to a shared workflow or action runs the jobs that use it. Only the
+  caller's own workflow file is caught for you (below).
+- **Pull requests are filtered:** compared with their base branch (the first parent of
+  the merge checkout). A `merge_group` is compared with its base commit, and a push to
+  another branch with the commit before the push, fetched shallow.
+- **Everything runs** (every group and `code` true, reason in the log):
+  - on a push to the default branch, or to the branches named in `full-run-branches`
+    (space-separated; replaces the default), so `main` is always fully tested;
+  - when there is nothing to compare with: a new branch or tag, a force push whose old
+    commit is gone, or any other event (`workflow_dispatch`, `schedule`,
+    `pull_request_target`);
+  - when the caller's own workflow file changed. The path comes from
+    `github.workflow_ref` and is logged (or "none found"), compared without regard to
+    case; set `workflow-path` to name another file, or `-` to turn it off.
+- **What counts:** every changed line, and any file added, deleted, renamed, or with its
+  mode or binary content changed. The one exception is opt-in: in a file matched by
+  `version-files` (pathspecs, default none, e.g. `version-files: package.json
+  chart/Chart.yaml`), a change that only moves version numbers (`1.2.3`,
+  `1.2.3-rc.4`, suffixes `rc`, `dev`, `alpha`, `beta` only, never inside a dotted run
+  of four or more parts such as an IP address) does not count, so a release bump runs
+  nothing. Lines are compared in order, so a reorder counts. Never list files where a
+  version move matters, such as requirements or a Dockerfile. `code` goes by file
+  names alone.
+- The caller job grants `contents: read`. No credentials are stored in the checkout;
+  the token is sent only with the one shallow fetch of the commit before a push.
 
-Inputs: `groups`, `ignore-versions`, `workflow-path`, `runner`, `kit-ref`. Outputs
-`groups`, `code`.
+Inputs: `groups` (required), `version-files`, `full-run-branches`, `workflow-path`,
+`runner`, `kit-ref`. Outputs `groups`, `code`.
 
 ## `demo-check`, `demo-audit`, `demo-capture` (composite actions)
 
