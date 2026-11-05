@@ -1,7 +1,7 @@
 name: Demo kit CI
 
-# Tests the demo kit (demo-kit/) and the release version script on GitHub's
-# hosted runners. The kit is shared by every project's demo, so it is tested
+# Tests the demo kit (demo-kit/), the release version script and the change
+# filter (scripts/changes.py, changes.yml) on GitHub's hosted runners. The kit is shared by every project's demo, so it is tested
 # here before the v1 tag can move.
 on:
   pull_request:
@@ -41,6 +41,54 @@ jobs:
           persist-credentials: false
       - run: pip install --no-cache-dir pytest==8.4.2
       - run: python -m pytest -q test_next_version.py
+
+  changes-script:
+    runs-on: ubuntu-latest
+    container: python:3.14-slim
+    defaults:
+      run:
+        working-directory: scripts
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The tests build throwaway git repos, so they need git.
+      - run: apt-get update -qq && apt-get install -y -qq --no-install-recommends git
+      - run: pip install --no-cache-dir pytest==8.4.2
+      - run: python -m pytest -q test_changes.py
+
+  # The reusable change filter end to end on this repo, with the script from
+  # this same commit. Which groups are true depends on the change, so the
+  # check is on the shape: valid JSON with exactly these keys, booleans, and a
+  # group that matches no file is false unless every group was forced true.
+  changes-selftest:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/changes.yml
+    with:
+      groups: |
+        # a comment line
+        workflows: .github/workflows
+        scripts: 'scripts/*.py'
+        none: does-not-exist ':!does-not-exist/either'
+      kit-ref: ${{ github.sha }}
+
+  changes-outputs:
+    needs: changes-selftest
+    runs-on: ubuntu-latest
+    steps:
+      - name: Outputs are valid and complete
+        env:
+          FLAGS: ${{ needs.changes-selftest.outputs.groups }}
+          CODE: ${{ needs.changes-selftest.outputs.code }}
+          SCRIPTS: ${{ fromJSON(needs.changes-selftest.outputs.groups).scripts }}
+        run: |
+          echo "groups=$FLAGS code=$CODE scripts=$SCRIPTS"
+          echo "$FLAGS" | jq -e 'keys == ["none", "scripts", "workflows"]'
+          echo "$FLAGS" | jq -e 'map_values(type == "boolean") | all'
+          echo "$FLAGS" | jq -e '.none == false or (map_values(.) | all)'
+          case "$CODE" in true|false) ;; *) echo "::error::code is '$CODE'"; exit 1 ;; esac
+          case "$SCRIPTS" in true|false) ;; *) echo "::error::fromJSON read '$SCRIPTS'"; exit 1 ;; esac
 
   # This repo is public and generic. Private homelab detail belongs in the
   # private Napandee/actions repo, never here (README "What belongs where").
