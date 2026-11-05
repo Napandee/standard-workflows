@@ -1,9 +1,10 @@
 name: Changes (reusable)
 
-# Says which named path groups a change touches, so a project runs its slow
-# jobs only when they are needed. The logic is scripts/changes.py (tested in
-# kit-ci); this workflow only checks out and runs it. The caller reads the
-# flags from JSON, because a reusable workflow's outputs are fixed:
+# Says which named path groups a pull request touches, so a project runs its
+# slow jobs only when they are needed. A push to the default branch runs
+# everything. The logic is scripts/changes.py (tested in kit-ci); this
+# workflow only checks out and runs it. The caller reads the flags from JSON,
+# because a reusable workflow's outputs are fixed:
 #
 #   jobs:
 #     changes:
@@ -11,21 +12,27 @@ name: Changes (reusable)
 #       uses: Napandee/standard-workflows/.github/workflows/changes.yml@v1
 #       with:
 #         groups: |
-#           ui: web scripts/check_*.mjs
+#           ui: web scripts/check_*.mjs .github
 #     ui-checks:
 #       needs: changes
 #       if: fromJSON(needs.changes.outputs.groups).ui
+#
+# plus a final `gate` job that is the only required check (README).
 on:
   workflow_call:
     inputs:
       groups:
-        description: "One group per line, 'name: pattern pattern ...' (git pathspecs)"
+        description: "One group per line, 'name: pattern pattern ...' (git pathspecs), or 'none' for code only"
+        type: string
+        required: true
+      version-files:
+        description: "Pathspecs of files where a change that only moves version numbers counts as no change; default none"
         type: string
         default: ""
-      ignore-versions:
-        description: A diff that only moves version numbers (1.2.3, 1.2.3-rc.1) counts as no change
-        type: boolean
-        default: true
+      full-run-branches:
+        description: "Branches whose pushes run everything, space-separated; default the repo's default branch"
+        type: string
+        default: ""
       workflow-path:
         description: "The caller's workflow file; when it changes, every group is true. Empty: taken from github.workflow_ref. '-': off"
         type: string
@@ -42,7 +49,7 @@ on:
         description: 'JSON object, group name -> true/false: fromJSON(needs.<job>.outputs.groups).<name>'
         value: ${{ jobs.changes.outputs.groups }}
       code:
-        description: "'true' when anything outside docs/ and *.md changed"
+        description: "The string 'true' when anything outside docs/ and *.md changed, else 'false'"
         value: ${{ jobs.changes.outputs.code }}
 
 permissions:
@@ -51,18 +58,18 @@ permissions:
 jobs:
   changes:
     runs-on: ${{ inputs.runner }}
-    timeout-minutes: 5
+    timeout-minutes: 10
     outputs:
       groups: ${{ steps.paths.outputs.groups }}
       code: ${{ steps.paths.outputs.code }}
     steps:
       # Depth 2: a pull request's merge checkout and its first parent (the
-      # base branch). Credentials stay for the one shallow fetch of the commit
-      # before a push, which a private repo needs; nothing but git and the
-      # script below runs in this job.
+      # base branch). No stored credentials: the script sends the token only
+      # with its one shallow fetch of the commit before a push.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 2
+          persist-credentials: false
 
       - name: Check out the script (inputs.kit-ref)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -77,15 +84,20 @@ jobs:
         id: paths
         env:
           GROUP_LINES: ${{ inputs.groups }}
+          VERSION_FILES: ${{ inputs.version-files }}
+          FULL_RUN_BRANCHES: ${{ inputs.full-run-branches }}
           EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           BEFORE: ${{ github.event.before || github.event.merge_group.base_sha }}
-          IGNORE_VERSIONS: ${{ inputs.ignore-versions }}
           WORKFLOW_PATH: ${{ inputs.workflow-path }}
           WORKFLOW_REF: ${{ github.workflow_ref }}
           REPOSITORY: ${{ github.repository }}
+          FETCH_TOKEN: ${{ github.token }}
         run: >-
           python3 .standard-kit/scripts/changes.py
-          --groups="$GROUP_LINES" --event="$EVENT" --before="$BEFORE"
-          --ignore-versions="$IGNORE_VERSIONS"
+          --groups="$GROUP_LINES" --version-files="$VERSION_FILES"
+          --event="$EVENT" --ref="$REF" --before="$BEFORE"
+          --default-branch="$DEFAULT_BRANCH" --full-run-branches="$FULL_RUN_BRANCHES"
           --workflow-path="$WORKFLOW_PATH" --workflow-ref="$WORKFLOW_REF"
           --repository="$REPOSITORY" --output="$GITHUB_OUTPUT"
