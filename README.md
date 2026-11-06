@@ -78,6 +78,16 @@ Builds the image (`build-args` input) and reports fixable HIGH/CRITICAL findings
 (table + SARIF artifact). Report only; the release is the gate. The caller owns the
 schedule.
 
+## `wiki.yml`
+
+Publishes docs pages to the repo's GitHub wiki, so the guide is written and reviewed with
+the code and shows up as the Wiki tab. Inputs: `sources` (folders or `.md` files) and `home`
+(the page that becomes Home). Links between published pages are rewritten, links to anything
+else go to the file in the repo, and a broken link or two pages with the same name fail the
+run. Edits made on the wiki itself are overwritten. Turn on the Wiki and save one page by
+hand before the first run; GitHub has no wiki repo until then. The caller grants
+`contents: write`. The logic is `scripts/wiki_build.py`.
+
 ## `changes.yml`
 
 Says which named path groups a pull request touches, so slow jobs run only when needed
