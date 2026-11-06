@@ -88,6 +88,14 @@ run. Edits made on the wiki itself are overwritten. Turn on the Wiki and save on
 hand before the first run; GitHub has no wiki repo until then. The caller grants
 `contents: write`. The logic is `scripts/wiki_build.py`.
 **Screenshots on a private repo:** set `screenshots-to: repo` on `release.yml`. Release assets of a private repo can't be loaded by a plain image link, so the shots are committed to `docs/images/` on the default branch instead (with `[skip ci]`), and the README links there. The default, `release`, attaches them to the release.
+## `scripts/check_readme.py`
+
+Keeps a README a landing page: 700 words at most (code, HTML and URLs don't count), and only
+the sections Why, Screenshots, Features, Quick start, Documentation and Licence. Contributing,
+local development and setup details belong in `CONTRIBUTING.md` and the guide, which GitHub
+shows as tabs. `README_WORD_LIMIT` overrides the budget; `--filled` also fails on a
+`[bracketed]` template placeholder. A project's PR workflow calls it after checking this repo
+out, so it stays in one place.
 
 ## `changes.yml`
 
