@@ -87,6 +87,7 @@ else go to the file in the repo, and a broken link or two pages with the same na
 run. Edits made on the wiki itself are overwritten. Turn on the Wiki and save one page by
 hand before the first run; GitHub has no wiki repo until then. The caller grants
 `contents: write`. The logic is `scripts/wiki_build.py`.
+**Screenshots on a private repo:** set `screenshots-to: repo` on `release.yml`. Release assets of a private repo can't be loaded by a plain image link, so the shots are committed to `docs/images/` on the default branch instead (with `[skip ci]`), and the README links there. The default, `release`, attaches them to the release.
 
 ## `changes.yml`
 

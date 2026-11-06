@@ -75,6 +75,10 @@ on:
         description: Deploy the demo to GitHub Pages
         type: boolean
         default: true
+      screenshots-to:
+        description: "Where screenshots go: release (public repos) or repo, docs/images on the default branch (private repos, whose release assets a plain image link can't reach)"
+        type: string
+        default: release
       kit-ref:
         description: "Ref of Napandee/standard-workflows the kit is checked out at; must match the ref this workflow is called at"
         type: string
@@ -95,6 +99,15 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       digest: ${{ steps.push.outputs.digest }}
     steps:
+      - name: Check screenshots-to
+        if: inputs.demo
+        env:
+          MODE: ${{ inputs.screenshots-to }}
+        run: |
+          case "$MODE" in
+            release | repo) ;;
+            *) echo "::error::screenshots-to must be release or repo, got: $MODE"; exit 1 ;;
+          esac
       - name: Refuse unless running on main
         if: github.ref != 'refs/heads/main'
         run: |
@@ -294,14 +307,21 @@ jobs:
       - uses: ./.standard-kit/demo-capture
         with:
           config: ${{ inputs.demo-config }}
-      - name: Attach screenshots to the release
+      - name: Publish screenshots
         env:
+          MODE: ${{ inputs.screenshots-to }}
           VERSION: ${{ needs.publish.outputs.version }}
           CONFIG: ${{ inputs.demo-config }}
+          SHOTS: shots
+          BRANCH: ${{ github.event.repository.default_branch }}
           GH_TOKEN: ${{ github.token }}
+          REMOTE_URL: https://github.com/${{ github.repository }}.git
+        # The token goes through git's environment config, not the URL.
         run: |
-          name=$(jq -r .name "$CONFIG")
-          gh release upload "v${VERSION}" "shots/${name}-hero.jpg" "shots/${name}-desktop.jpg" "shots/${name}-mobile.jpg" --clobber
+          GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          echo "::add-mask::$GIT_CONFIG_VALUE_0"
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader GIT_CONFIG_VALUE_0
+          NAME=$(jq -r .name "$CONFIG") SHOTS="$PWD/shots" bash .standard-kit/scripts/publish_shots.sh
 
   pages:
     needs: demo

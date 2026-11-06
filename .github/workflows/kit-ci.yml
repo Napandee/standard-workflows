@@ -58,6 +58,7 @@ jobs:
       - run: pip install --no-cache-dir pytest==8.4.2
       - run: python -m pytest -q test_changes.py
       - run: python -m pytest -q test_wiki_build.py
+      - run: python -m pytest -q test_publish_shots.py
 
   # The reusable change filter end to end on this repo, with the script from
   # this same commit. The check job works out on its own what each flag must
