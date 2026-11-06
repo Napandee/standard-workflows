@@ -1,0 +1,89 @@
+name: Wiki (reusable)
+
+# Publishes pages from a repo's docs to its GitHub wiki, so the guide is written
+# and reviewed with the code and shows up as the Wiki tab. The wiki's content is
+# replaced on each run: edits made on the wiki itself are overwritten.
+# The logic is scripts/wiki_build.py (tested in kit-ci).
+#
+# GitHub creates a wiki's git repo only once its first page exists, so a person
+# must turn on the Wiki and save one page by hand before the first run.
+#
+#   on:
+#     push:
+#       branches: [main]
+#       paths: ["docs/**", ".github/workflows/wiki.yml"]
+#     workflow_dispatch:
+#   permissions:
+#     contents: write
+#   jobs:
+#     wiki:
+#       uses: Napandee/standard-workflows/.github/workflows/wiki.yml@v1
+#       with:
+#         home: docs/guide/index.md
+#         sources: docs/guide docs/admin
+on:
+  workflow_call:
+    inputs:
+      sources:
+        description: "Folders or .md files to publish, space-separated"
+        type: string
+        required: true
+      home:
+        description: "The page that becomes the wiki's Home"
+        type: string
+        required: true
+      runner:
+        type: string
+        default: ubuntu-latest
+      kit-ref:
+        description: "Ref of this repo to take the script from; must match the caller's pin"
+        type: string
+        default: v1
+
+jobs:
+  publish:
+    runs-on: ${{ inputs.runner }}
+    permissions:
+      contents: write
+    # Two runs at once would race on the wiki's push.
+    concurrency:
+      group: wiki-${{ github.repository }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: Napandee/standard-workflows
+          ref: ${{ inputs.kit-ref }}
+          path: .standard-kit
+      - name: Build the pages
+        env:
+          SOURCES: ${{ inputs.sources }}
+          HOME_PAGE: ${{ inputs.home }}
+          REPO_URL: https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}
+        # SOURCES is split into words on purpose.
+        run: |
+          # shellcheck disable=SC2086
+          python3 .standard-kit/scripts/wiki_build.py --out "$RUNNER_TEMP/pages" \
+            --home "$HOME_PAGE" --repo-url "$REPO_URL" $SOURCES
+      - name: Publish
+        env:
+          TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          wiki="$RUNNER_TEMP/wiki"
+          if ! git clone -q "https://x-access-token:${TOKEN}@github.com/${REPO}.wiki.git" "$wiki"; then
+            echo "::error::No wiki repo yet. Turn on the Wiki in the repo's settings and save one page by hand, then run this again."
+            exit 1
+          fi
+          find "$wiki" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+          cp -R "$RUNNER_TEMP/pages/." "$wiki/"
+          git -C "$wiki" add -A
+          if git -C "$wiki" diff --cached --quiet; then
+            echo "Wiki already up to date"
+            exit 0
+          fi
+          git -C "$wiki" -c user.name="github-actions[bot]" \
+            -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -q -m "Publish from ${GITHUB_SHA::7}"
+          git -C "$wiki" push -q origin HEAD
