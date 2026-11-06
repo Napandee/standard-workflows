@@ -124,3 +124,33 @@ def test_broken_link_of_any_form_fails(tmp_path, text):
     _, r = build(tmp_path, {"docs/guide/index.md": text}, "docs/guide")
     assert r.returncode != 0
     assert "gone.md" in r.stderr
+
+
+def test_symlinked_page_fails_rather_than_publishing_its_target(tmp_path):
+    secret = tmp_path / "secret.md"
+    secret.write_text("token\n")
+    repo = tmp_path / "repo" / "docs" / "guide"
+    repo.mkdir(parents=True)
+    (repo / "index.md").write_text("x\n")
+    (repo / "leak.md").symlink_to(secret)
+    out = tmp_path / "wiki"
+    r = subprocess.run(
+        [sys.executable, str(SCRIPT), "--out", str(out), "--home", "docs/guide/index.md",
+         "--repo-url", "https://github.com/o/r/blob/main", "docs/guide"],
+        cwd=tmp_path / "repo", capture_output=True, text=True)
+    assert r.returncode != 0
+    assert "leak.md" in r.stderr
+    assert not (out / "leak.md").exists()
+
+
+def test_source_outside_the_repo_fails(tmp_path):
+    (tmp_path / "outside.md").write_text("x\n")
+    _, r = build(tmp_path, {"docs/guide/index.md": "x\n"}, "docs/guide", "../outside.md")
+    assert r.returncode != 0
+    assert "outside.md" in r.stderr
+
+
+def test_source_that_is_not_markdown_fails(tmp_path):
+    _, r = build(tmp_path, {"docs/guide/index.md": "x\n", ".env": "SECRET=1\n"}, "docs/guide", ".env")
+    assert r.returncode != 0
+    assert ".env" in r.stderr

@@ -50,12 +50,15 @@ jobs:
       group: wiki-${{ github.repository }}
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: Napandee/standard-workflows
           ref: ${{ inputs.kit-ref }}
           path: .standard-kit
+          persist-credentials: false
       - name: Build the pages
         env:
           SOURCES: ${{ inputs.sources }}
@@ -70,9 +73,14 @@ jobs:
         env:
           TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
+        # The token goes through git's environment config, not the URL, so it is
+        # neither in a process's arguments nor in the clone's .git/config.
         run: |
+          GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)"
+          echo "::add-mask::$GIT_CONFIG_VALUE_0"
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader GIT_CONFIG_VALUE_0
           wiki="$RUNNER_TEMP/wiki"
-          if ! git clone -q "https://x-access-token:${TOKEN}@github.com/${REPO}.wiki.git" "$wiki"; then
+          if ! git clone -q "https://github.com/${REPO}.wiki.git" "$wiki"; then
             echo "::error::No wiki repo yet. Turn on the Wiki in the repo's settings and save one page by hand, then run this again."
             exit 1
           fi

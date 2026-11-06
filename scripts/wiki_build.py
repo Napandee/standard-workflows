@@ -32,8 +32,13 @@ def collect(sources, home):
         else:
             sys.exit(f"source not found: {source}")
     pages, owners = {}, {}
+    root = Path.cwd().resolve()
     for path in files:
         key = os.path.normpath(path)
+        # This runs with a write token on a public repo's content: a symlink or an
+        # escaping path must not publish a file from outside the repo.
+        if path.is_symlink() or path.suffix != ".md" or not path.resolve().is_relative_to(root):
+            sys.exit(f"not a Markdown file inside the repo: {key}")
         name = "Home" if key == os.path.normpath(home) else path.stem
         if name in owners:
             sys.exit(f"two pages would be called {name}: {owners[name]} and {key}")
