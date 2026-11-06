@@ -1,7 +1,8 @@
 # standard-workflows
 
 Shared GitHub Actions for Napandee's projects (public and private): **deliberate
-releases, a fake-data demo checked on every PR, and a Trivy scan**. MIT licensed.
+releases, a fake-data demo checked on every PR, a Trivy scan and a change filter**. MIT
+licensed.
 
 Callers pin `@v1`. Every workflow takes `kit-ref` (default `v1`), the ref of this repo
 it checks out for the release script and demo kit: **it must match the ref you call
@@ -77,6 +78,108 @@ Builds the image (`build-args` input) and reports fixable HIGH/CRITICAL findings
 (table + SARIF artifact). Report only; the release is the gate. The caller owns the
 schedule.
 
+## `changes.yml`
+
+Says which named path groups a pull request touches, so slow jobs run only when needed
+and hosted minutes are not spent on a docs fix. The caller lists its groups; the
+outputs are `groups`, a JSON object of name → `true`/`false` (a reusable workflow's
+outputs are fixed, hence JSON), and `code`, the **string** `'true'` when anything
+outside `docs/` and `*.md` changed (else `'false'`; compare with `== 'true'`). The logic
+is `scripts/changes.py`.
+
+```yaml
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  changes:
+    permissions: { contents: read }
+    uses: Napandee/standard-workflows/.github/workflows/changes.yml@v1
+    with:
+      groups: |
+        ui: web scripts/check_*.mjs .github
+        installer: scripts/install.sh installer .github
+  ui-checks:
+    needs: changes
+    if: fromJSON(needs.changes.outputs.groups).ui
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "the slow UI checks"
+  build:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "build and test"
+  # The only required check. A skipped job is fine; a failed or cancelled one,
+  # or a failed filter (which would skip everything), is not.
+  gate:
+    if: always()
+    needs: [changes, ui-checks, build]
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          FILTER: ${{ needs.changes.result }}
+          BROKEN: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+        run: |
+          if [ "$FILTER" != success ] || [ "$BROKEN" = true ]; then
+            echo "::error::changes: $FILTER; a needed job failed or was cancelled: $BROKEN"
+            exit 1
+          fi
+```
+
+- **Make `gate` the only required check** in branch protection, and list every job in
+  its `needs`. A required job that is skipped counts as passed, so requiring the slow
+  jobs themselves would not protect anything, and a failing `changes` job would skip
+  them all.
+- **Group names in `if:` are not checked:** `fromJSON(...).iu` is simply empty, and the
+  job never runs. Copy names from the `groups` input.
+- **Groups:** one per line, `name: pattern pattern ...`; blank lines and `#` comments
+  are skipped, and a pattern with spaces can be quoted. Names are letters, digits, `_`
+  and `-` (read a name with `-` as `fromJSON(...)['my-group']`). Patterns are git
+  pathspecs: `web` is the folder, `*` also crosses `/` (`*.mjs` matches at any depth),
+  `':!web/vendor'` excludes. The job fails, naming the line, group or pattern, on a
+  malformed line, a pattern git refuses, or a pattern that matches no file at HEAD (an
+  exclude is checked by what it excludes), so a stale path cannot silently turn a group
+  off. An empty input fails too; write `groups: none` to use `code` alone.
+- **Add `.github` to every group** (or keep a shared `ci` group that runs everything),
+  so a change to a shared workflow or action runs the jobs that use it. Only the
+  caller's own workflow file is caught for you (below).
+- **Pull requests are filtered:** compared with their base branch (the first parent of
+  the merge checkout). A `merge_group` is compared with its base commit, and a push to
+  another branch with the commit before the push, fetched shallow.
+- **Everything runs** (every group and `code` true, reason in the log):
+  - on a push to the default branch, so `main` is always fully tested, or to the
+    branches named in `full-run-branches` (space-separated). That list **replaces** the
+    default, so include the default branch in it (`full-run-branches: main release`);
+  - on any push when the default branch is unknown and `full-run-branches` is empty
+    (logged as "default branch unknown");
+  - when there is nothing to compare with: a new branch or tag, a force push whose old
+    commit is gone, or any other event (`workflow_dispatch`, `schedule`,
+    `pull_request_target`);
+  - when the caller's own workflow file changed. The path comes from
+    `github.workflow_ref` and is logged (or "none found"), compared without regard to
+    case; set `workflow-path` to name another file, or `-` to turn it off.
+- **What counts:** every changed line, and any file added, deleted, renamed, or with its
+  mode or binary content changed. The one exception is opt-in: in a file matched by
+  `version-files` (pathspecs, default none, e.g. `version-files: VERSION`), a change
+  that only moves version numbers (`1.2.3`, `1.2.3-rc.4`, suffixes `rc`, `dev`,
+  `alpha`, `beta` only, never inside a dotted run of four or more parts such as an IP
+  address) does not count, so a release bump runs nothing. Lines are compared in
+  order, so a reorder counts.
+- **List only files that hold nothing but the project's own version.** The filter cannot
+  tell the project's version from a dependency's: in a listed file a dependency bump
+  counts as no change too. `package.json`, `Chart.yaml` and `pyproject.toml` usually
+  carry dependency versions, as do requirements files and Dockerfiles, so they must
+  not be listed. `code` goes by file names alone.
+- The caller job grants `contents: read`. No credentials are stored in the checkout;
+  the token is sent, to the origin URL only, with the one shallow fetch of the commit
+  before a push.
+
+Inputs: `groups` (required), `version-files`, `full-run-branches`, `workflow-path`,
+`runner`, `kit-ref`. Outputs `groups`, `code`.
+
 ## `demo-check`, `demo-audit`, `demo-capture` (composite actions)
 
 Run the demo kit (`demo-kit/`) in the pinned Playwright image against `_site`, with
@@ -93,6 +196,9 @@ from `window.DEMO_SITE`; saves return "Demo: nothing is saved"), `serve.mjs`
 ```bash
 podman run --rm -v "$PWD:/repo:Z" -w /repo docker.io/rhysd/actionlint:1.7.7
 cd demo-kit && ./run.sh test
+# scripts/changes.py (needs git and pytest):
+podman run --rm -v "$PWD:/repo:Z" -w /repo/scripts docker.io/library/python:3.14-slim sh -c \
+  'apt-get update -qq && apt-get install -y -qq git >/dev/null && pip install -q pytest==8.4.2 && python -m pytest -q test_changes.py'
 ```
 
 Third-party actions are pinned by commit SHA with the version in a comment;
